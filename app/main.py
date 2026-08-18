@@ -118,8 +118,6 @@ def get_recommendations(user_id: str):
     recommendations = (user_df.sort_values("score",ascending=False).head(10))
 
     latency_ms = (time.perf_counter() - start_time) * 1000
-
-    latency_ms = (time.perf_counter() - start_time) * 1000
     logger.info("recommendation_request " 
                 "user_id=%s latency_ms=%.2f fallback=%s",
                 user_id, latency_ms, "False"
