@@ -36,19 +36,6 @@ def test_recommendations_are_sorted_by_score():
     assert scores == sorted(scores, reverse=True)
 
 
-def test_recommendations_are_sorted_by_score():
-    with TestClient(app) as client:
-        user_id = app.state.feature_df["user_id"].iloc[0]
-
-        response = client.get(f"/recommendations/{user_id}")
-
-    recommendations = response.json()["recommendations"]
-
-    scores = [item["score"] for item in recommendations]
-
-    assert scores == sorted(scores, reverse=True)
-
-
 def test_cold_start_uses_most_popular_products():
     with TestClient(app) as client:
         expected = (
