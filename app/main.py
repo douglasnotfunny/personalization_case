@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from app.feature_processing import build_feature_dataset
 from app.metrics import record_request, record_error, get_metrics
 from app.logging_config import configure_logging
-from app.utils.utils import user_empty
+from app.utils.utils import user_empty, load_model
 
 configure_logging()
 
@@ -61,17 +61,8 @@ async def lifespan(app: FastAPI):
         len(feature_df),
     )
 
-    with open("model/model.pkl", "rb") as file:
-        artifact = pickle.load(file)
-
-    model = artifact["model"]
-    scaler = artifact["scaler"]
-    feature_cols = artifact["feature_cols"]
-
-    logger.info(
-        "model_loaded features=%s",
-        feature_cols,
-    )
+    load_model_recommendation = load_model()
+    feature_cols = load_model_recommendation["feature_cols"]
 
     missing_features = set(feature_cols) - set(feature_df.columns)
 
@@ -80,11 +71,10 @@ async def lifespan(app: FastAPI):
             f"Missing model features: {missing_features}"
         )
 
-    # Guardamos tudo em memória para as requisições.
     app.state.feature_df = feature_df
     app.state.products = products
-    app.state.model = model
-    app.state.scaler = scaler
+    app.state.model = load_model_recommendation["model"]
+    app.state.scaler = load_model_recommendation["scaler"]
     app.state.feature_cols = feature_cols
 
     yield
