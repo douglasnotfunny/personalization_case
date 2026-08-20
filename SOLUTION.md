@@ -1,287 +1,220 @@
 # Personalization Service --- Solution
 
-## 1. Overview
+## 1. Visão geral
 
-Este projeto implementa um microserviço de recomendação utilizando
-FastAPI e um modelo de machine learning previamente treinado em
-scikit-learn.
+O projeto implementa um microserviço de recomendação utilizando
+FastAPI para calculo de um modelo de machine learning 
+previamente treinado em scikit-learn.
 
-A solução foi estruturada para separar preparação de dados, serving e
-inferência:
+O serviço é responsável por:
 
--   as features derivadas do histórico são preparadas durante o startup;
--   o modelo e o scaler são carregados uma única vez;
--   durante uma requisição, são selecionadas as features referentes ao
-    usuário;
--   o modelo calcula um score para os produtos;
--   os produtos são ordenados pelo score e o Top 10 é retornado;
--   usuários sem histórico utilizam um fallback baseado em popularidade;
--   logs e métricas permitem acompanhar latência, requests, erros e uso
-    do fallback.
+-   preparar as features a partir do histórico de eventos e catálogo;
+-   carregar e validar o artefato do modelo;
+-   receber um `user_id`;
+-   calcular o score dos produtos para esse usuário;
+-   retornar os produtos ranqueados;
+-   tratar usuários sem histórico através de cold start;
+-   registrar logs e métricas de operação.
 
-Os CSVs fornecidos pelo case são tratados como a fonte de entrada da
-aplicação. A camada de processamento é separada da camada de inferência,
-permitindo que a origem dos dados seja substituída por uma camada de
-armazenamento ou serving distribuída sem alterar o contrato da API.
+O modelo não é treinado pela aplicação. O artefato recebido pelo case é
+utilizado diretamente no serving.
 
 ------------------------------------------------------------------------
 
 ## 2. Arquitetura
 
-A solução possui duas etapas principais: preparação das features e
-serving online.
-
-### Preparação das features
+O fluxo da aplicação é dividido em preparação e serving.
 
 ``` text
-events.csv + products.csv
-            ↓
-    Feature Processing
-            ↓
-      Feature Dataset
+                     STARTUP
+                        │
+        ┌───────────────┴────────────────┐
+        │                                │
+   events.csv                       products.csv
+        │                                │
+        └───────────────┬────────────────┘
+                        ↓
+               Feature Processing
+                        ↓
+                 Feature Dataset
+                        │
+                        │
+                   model.pkl
+                        ↓
+                   Model Loader
+                        │
+                        ↓
+                 FastAPI app.state
+                        │
+                ────────┴────────
+                        │
+                     REQUEST
+                        │
+                     user_id
+                        ↓
+                Seleção do usuário
+                        │
+                  ┌─────┴─────┐
+                  │           │
+               existe       não existe
+                  │           │
+                  ↓           ↓
+              Modelo      Cold Start
+                  │           │
+                  └─────┬─────┘
+                        ↓
+                     Ranking
+                        ↓
+                      Top 10
 ```
 
-### Serving online
+### Startup
 
-``` text
-request
-   ↓
-user_id
-   ↓
-features do usuário
-   ↓
-scaler
-   ↓
-modelo
-   ↓
-ranking
-   ↓
-Top 10
-```
+Durante o startup:
 
-O feature processing é executado durante o startup porque é uma etapa
-determinística e independente da requisição. Dessa forma, o custo de
-construção das features não faz parte do caminho crítico da API.
+1.  `events.csv` e `products.csv` são carregados;
+2.  o dataset de features é construído;
+3.  o modelo é carregado uma única vez;
+4.  as features esperadas pelo modelo são validadas contra o dataset
+    produzido;
+5.  os objetos necessários são armazenados em `app.state`.
 
-O modelo, o scaler e as features processadas ficam disponíveis para as
-requisições enquanto a instância está ativa.
+Essa decisão retira o processamento pesado e o carregamento do modelo do
+caminho crítico da requisição.
 
-A arquitetura mantém uma separação clara entre:
-
--   processamento de dados;
--   armazenamento/serving das features;
--   inferência;
--   apresentação das recomendações.
-
-Essa separação permite escalar cada responsabilidade de acordo com sua
-necessidade.
-
-------------------------------------------------------------------------
-
-## 3. Dados e Feature Processing
-
-O serviço recebe dois datasets:
-
--   `events.csv`: histórico de interações entre usuários e produtos;
--   `products.csv`: informações dos produtos.
-
-A partir desses dados é construído o dataset utilizado pelo modelo.
-
-### Features
-
-  -----------------------------------------------------------------------
-  Feature                             Descrição
-  ----------------------------------- -----------------------------------
-  `interactions`                      Quantidade de interações do usuário
-                                      com o produto
-
-  `price`                             Preço do produto
-
-  `avg_rating`                        Avaliação média do produto
-
-  `popularity_score`                  Score de popularidade do produto
-
-  `user_affinity_match`               Indica se a categoria do produto
-                                      corresponde à categoria de maior
-                                      afinidade do usuário
-  -----------------------------------------------------------------------
-
-### `user_affinity_match`
-
-Essa feature é derivada do histórico do usuário.
-
-Primeiro é identificada a categoria com maior afinidade para o usuário.
-Depois essa categoria é comparada com a categoria de cada produto.
-
-``` text
-histórico do usuário
-        ↓
-categoria de maior afinidade
-        ↓
-categoria do produto
-        ↓
-match
-   ┌────┴────┐
-   │         │
-  1          0
-match     sem match
-```
-
-O resultado é:
-
--   `1`: o produto pertence à categoria de maior afinidade;
--   `0`: o produto não pertence à categoria de maior afinidade.
-
-### Dataset de features
-
-O processamento gera as combinações usuário-produto necessárias para a
-inferência.
-
-No dataset fornecido pelo case temos:
-
--   500 usuários;
--   60 produtos;
--   8.000 eventos;
--   30.000 combinações usuário-produto.
-
-O resultado do processamento é mantido em memória para permitir acesso
-rápido às features durante a requisição.
-
-A camada de processamento é independente do contrato da API. Isso
-permite que a mesma lógica seja alimentada por diferentes fontes de
-dados sem alterar a etapa de inferência.
-
-------------------------------------------------------------------------
-
-## 4. Inferência Online
-
-O modelo já está treinado e armazenado em:
-
-``` text
-model/model.pkl
-```
-
-A API não realiza treinamento durante o runtime.
-
-Durante o startup são carregados:
-
--   modelo;
--   scaler;
--   lista de features utilizadas pelo modelo.
+### Request
 
 Durante uma requisição:
 
+1.  o `user_id` é recebido;
+2.  as linhas correspondentes ao usuário são selecionadas;
+3.  as features esperadas pelo modelo são extraídas;
+4.  o scaler é aplicado;
+5.  o modelo calcula o score;
+6.  os produtos são ordenados;
+7.  os 10 maiores scores são retornados.
+
+------------------------------------------------------------------------
+
+## 3. Feature Processing
+
+O processamento utiliza:
+
+-   `events.csv`, contendo o histórico de interações;
+-   `products.csv`, contendo os dados do catálogo.
+
+As features utilizadas pelo modelo são:
+
+  Feature                 Origem
+  ----------------------- ----------------------------------
+  `interactions`          histórico de eventos
+  `price`                 catálogo
+  `avg_rating`            catálogo
+  `popularity_score`      catálogo
+  `user_affinity_match`   derivada do histórico + catálogo
+
+### Interactions
+
+A quantidade de interações é calculada agrupando os eventos por:
+
+``` text
+user_id + product_id
+```
+
+Cada ocorrência representa uma interação no histórico.
+
+### User affinity
+
+Para cada usuário, os eventos são associados às categorias dos produtos.
+
+A categoria com maior quantidade de interações é considerada a categoria
+de maior afinidade.
+
+A feature `user_affinity_match` indica se a categoria do produto
+corresponde à categoria de maior afinidade do usuário.
+
+Esse critério segue a definição de referência fornecida pelo model card.
+
+### Dataset usuário-produto
+
+Depois das agregações, são geradas as combinações entre usuários
+existentes no histórico e produtos do catálogo.
+
+Cada linha representa:
+
+``` text
+(user_id, product_id, features)
+```
+
+O modelo pode então calcular um score individual para cada produto
+candidato.
+
+------------------------------------------------------------------------
+
+## 4. Modelo
+
+O artefato fornecido pelo case contém:
+
+``` text
+model/
+├── model.pkl
+└── model_card.json
+```
+
+O `model.pkl` contém:
+
+-   modelo;
+-   scaler;
+-   ordem das features esperadas.
+
+O modelo é uma `LogisticRegression` e o pré-processamento utiliza
+`StandardScaler`.
+
+A aplicação encapsula o carregamento do artefato na função
+`load_model()`, evitando que o endpoint precise conhecer o processo de
+leitura do arquivo.
+
+O carregamento acontece durante o startup e os objetos são mantidos em
+memória através de `app.state`.
+
+### Validação das features
+
+Depois do carregamento do modelo, a aplicação verifica se todas as
+features esperadas pelo artefato existem no dataset produzido.
+
+Se alguma feature estiver ausente, o startup falha com erro explícito.
+
+Essa validação evita que uma incompatibilidade entre o processamento e o
+modelo seja descoberta somente durante uma requisição.
+
+------------------------------------------------------------------------
+
+## 5. Inferência e Ranking
+
+Para usuários existentes no histórico:
+
 ``` text
 user_id
    ↓
-selecionar features
+linhas do usuário
    ↓
-scaler
+feature_cols
    ↓
-predict_proba()
+StandardScaler
+   ↓
+LogisticRegression.predict_proba
    ↓
 score
    ↓
-ordenar
+sort descending
    ↓
 Top 10
 ```
 
-O modelo utilizado é uma `LogisticRegression`, acompanhada de um
-`StandardScaler`.
+O score produzido pelo modelo é a base do ranking, conforme solicitado
+pelo case.
 
-### Por que o score é calculado em tempo de requisição?
-
-As features são preparadas antecipadamente, enquanto o score final é
-calculado no momento da requisição.
-
-Essa separação permite manter o dataset de features desacoplado do
-resultado final de recomendação e mantém o ranking como parte do serviço
-online.
-
-Também evita manter um segundo artefato contendo recomendações finais
-pré-calculadas para todos os usuários.
-
-A estratégia de inferência online é adequada quando o custo do modelo
-está dentro do SLA da API. Caso o modelo ou o volume de candidatos
-cresça, a arquitetura possui espaço para introduzir cache ou pré-cálculo
-seletivo sem alterar o contrato externo do serviço.
-
-------------------------------------------------------------------------
-
-## 5. Cold Start
-
-Um usuário é considerado cold start quando não possui histórico
-disponível no dataset de eventos.
-
-Nesse cenário, não existem informações comportamentais suficientes para
-gerar uma recomendação personalizada pelo modelo.
-
-A estratégia implementada é utilizar a popularidade dos produtos:
-
-``` text
-usuário sem histórico
-        ↓
-fallback
-        ↓
-ordenar por popularity_score
-        ↓
-Top 10
-```
-
-A resposta indica explicitamente que o fallback foi utilizado:
-
-``` json
-{
-  "user_id": "u_090909",
-  "recommendations": [...],
-  "fallback": true
-}
-```
-
-### Por que popularidade?
-
-A estratégia é:
-
--   determinística;
--   rápida;
--   simples;
--   disponível mesmo sem histórico do usuário;
--   capaz de garantir uma resposta válida.
-
-A principal limitação é que o resultado não é personalizado.
-
-A estratégia de fallback pode ser enriquecida com sinais contextuais,
-como categoria, região, dispositivo ou outros atributos disponíveis no
-momento da requisição.
-
-------------------------------------------------------------------------
-
-## 6. API
-
-A aplicação possui três endpoints principais.
-
-### Health
-
-``` http
-GET /health
-```
-
-Resposta:
-
-``` json
-{
-  "status": "ok"
-}
-```
-
-### Recomendações
-
-``` http
-GET /recommendations/{user_id}
-```
-
-Exemplo para um usuário conhecido:
+A resposta contém:
 
 ``` json
 {
@@ -296,22 +229,78 @@ Exemplo para um usuário conhecido:
 }
 ```
 
-Para um usuário sem histórico:
+O modelo e o scaler não são carregados durante a requisição. Eles
+permanecem disponíveis na instância da aplicação depois do startup.
+
+------------------------------------------------------------------------
+
+## 6. Cold Start
+
+Quando o `user_id` não aparece no histórico, não existem informações
+suficientes para calcular as features comportamentais necessárias ao
+ranking personalizado.
+
+A aplicação utiliza um fallback baseado em `popularity_score`.
+
+``` text
+usuário sem histórico
+        ↓
+fallback
+        ↓
+produtos ordenados por popularidade
+        ↓
+Top 10
+```
+
+A resposta indica explicitamente o uso do fallback:
 
 ``` json
 {
-  "user_id": "u_090909",
+  "user_id": "cold_start_user",
   "recommendations": [
     {
-      "product_id": "p_000",
-      "score": 0.652
+      "product_id": "p_030",
+      "score": 0.801
     }
   ],
   "fallback": true
 }
 ```
 
-### Métricas
+Essa estratégia garante uma resposta mesmo quando não existe histórico
+individual.
+
+A escolha por popularidade também mantém o fallback simples,
+determinístico e barato em termos computacionais.
+
+------------------------------------------------------------------------
+
+## 7. API
+
+### Health check
+
+``` http
+GET /health
+```
+
+Resposta:
+
+``` json
+{
+  "status": "ok"
+}
+```
+
+### Recommendation
+
+``` http
+GET /recommendations/{user_id}
+```
+
+Retorna o Top 10 para usuários conhecidos ou utiliza o fallback para
+usuários sem histórico.
+
+### Metrics
 
 ``` http
 GET /metrics
@@ -330,96 +319,119 @@ Exemplo:
 
 ------------------------------------------------------------------------
 
-## 7. Observabilidade
+## 8. Observabilidade
 
-A aplicação possui logs por requisição e métricas agregadas.
+A aplicação registra logs estruturados em formato legível por sistemas
+de agregação.
 
-### Logs
-
-Cada requisição de recomendação registra:
+Para cada requisição de recomendação são registrados:
 
 -   `user_id`;
--   latência;
--   utilização do fallback.
+-   `latency_ms`;
+-   `fallback`.
 
-Exemplo:
+Exemplos:
 
 ``` text
 recommendation_request user_id=u_0242 latency_ms=11.02 fallback=False
 recommendation_request user_id=u_090909 latency_ms=7.27 fallback=True
 ```
 
-Isso permite investigar o comportamento de uma requisição individual.
+Também são registrados eventos importantes do ciclo de vida:
+
+``` text
+feature_processing_started
+datasets_loaded
+feature_processing_completed
+model_loaded
+```
 
 ### Métricas
 
-O endpoint `/metrics` disponibiliza:
+São mantidas as seguintes métricas:
 
-  Métrica                Descrição
-  ---------------------- ----------------------------------------------
-  `requests_total`       Total de requisições de recomendação
-  `fallback_total`       Total de requisições atendidas pelo fallback
-  `errors_total`         Total de erros internos registrados
-  `average_latency_ms`   Latência média das requisições
+-   total de requisições;
+-   total de fallbacks;
+-   total de erros;
+-   latência média.
 
-As métricas são mantidas em memória nesta implementação.
+A exposição ocorre pelo endpoint `/metrics`.
 
-A camada de métricas pode ser substituída por um sistema externo e
-agregável entre réplicas, como Prometheus, mantendo o mesmo conjunto de
-indicadores expostos pela aplicação.
+### Próximas métricas
 
-### Indicadores adicionais
+A evolução natural da observabilidade é adicionar:
 
-A observabilidade pode ser expandida com:
-
--   p50, p95 e p99 de latência;
--   métricas por endpoint;
--   métricas de erro por tipo;
+-   p50;
+-   p95;
+-   p99;
+-   latência por etapa;
+-   taxa de erro;
+-   métricas de negócio;
 -   request/correlation ID;
 -   tracing distribuído;
--   alertas;
--   métricas centralizadas entre réplicas.
+-   alertas.
 
 ------------------------------------------------------------------------
 
-## 8. Testes
+## 9. Testes
 
-A aplicação possui testes para as principais responsabilidades:
+Os testes cobrem as principais partes do serviço.
+
+### Feature processing
+
+Valida:
+
+-   cálculo de `interactions`;
+-   cálculo de `user_affinity_match`.
+
+### Health
+
+Valida o endpoint `/health`.
+
+### Metrics
+
+Valida a disponibilidade e a estrutura do endpoint `/metrics`.
+
+### Recommendation
+
+Valida:
+
+-   usuário conhecido;
+-   quantidade de recomendações;
+-   existência de `product_id` e `score`;
+-   scores entre 0 e 1;
+-   ordenação decrescente.
+
+### Cold start
+
+Valida que um usuário inexistente recebe os produtos mais populares.
+
+### End-to-end
+
+O teste de integração utiliza `TestClient` e executa o fluxo HTTP
+completo:
 
 ``` text
-tests/
-├── test_feature_processing.py
-├── test_health.py
-└── test_recommendations.py
+HTTP request
+     ↓
+FastAPI
+     ↓
+feature dataset
+     ↓
+modelo
+     ↓
+ranking
+     ↓
+HTTP response
 ```
 
-São cobertos:
-
--   feature processing;
--   health check;
--   métricas;
--   endpoint de recomendação;
--   ordenação por score;
--   cold start/fallback;
--   fluxo end-to-end.
-
-O teste end-to-end utiliza `TestClient` e executa o fluxo real da
-aplicação sem mockar o modelo, scaler ou feature processing.
-
-Resultado atual:
-
-``` text
-7 passed
-```
-
-Isso valida tanto os componentes individuais quanto o fluxo principal da
-aplicação.
+Sem mockar as camadas internas.
 
 ------------------------------------------------------------------------
 
-## 9. Docker
+## 10. Docker
 
-A aplicação pode ser executada em um container.
+A aplicação possui containerização através de Docker.
 
 ### Build
 
@@ -433,333 +445,156 @@ docker build -t personalization-api .
 docker run --rm -p 8000:8000 personalization-api
 ```
 
-O container contém os artefatos necessários:
+O container executa a mesma aplicação utilizada no ambiente local.
 
-``` text
-app/
-data/
-model/
-requirements.txt
-```
-
-O container foi validado com:
-
--   `/health`;
--   `/recommendations/{user_id}`;
--   usuário conhecido;
--   usuário em cold start;
--   `/metrics`.
-
-O startup do container executa o feature processing e carrega o modelo
-antes de a aplicação começar a atender requisições.
+O `Dockerfile` instala as dependências antes de copiar o código da
+aplicação, permitindo aproveitar o cache da camada de instalação quando
+os arquivos de dependências não mudam.
 
 ------------------------------------------------------------------------
 
-## 10. Trade-offs e Decisões
+## 11. Decisões arquiteturais
 
 ### Feature processing no startup
 
-**Decisão**
+**Motivo:**  
+O processamento das features não depende do `user_id` recebido pela 
+requisição. Executá-lo durante o startup evita repetir a mesma preparação 
+a cada chamada da API.
 
-Executar o processamento das features antes de atender requisições.
+**Benefício:**  
+O caminho da requisição fica concentrado na seleção das features, 
+transformação, inferência e ranking, mantendo a latência mais previsível.
 
-**Motivação**
+**Evolução:**  
+A etapa de feature processing pode ser desacoplada da API e executada
+por um processo de atualização de dados, disponibilizando as features
+já processadas para o serviço de recomendação.
 
-O processamento é determinístico e não depende do `user_id` recebido
-pela API. Mantê-lo fora do caminho crítico evita repetir esse trabalho
-em cada requisição.
-
-**Benefício**
-
-A requisição fica concentrada em seleção de features, transformação,
-inferência e ranking.
-
-**Trade-off**
-
-O resultado do processamento fica associado ao ciclo de vida da
-instância. Alterações nos dados exigem uma nova execução do
-processamento.
-
-**Melhoria**
-
-A separação entre processamento e serving permite mover a geração das
-features para um pipeline independente e disponibilizar os resultados
-por uma camada de armazenamento/serving distribuída.
-
-------------------------------------------------------------------------
+---
 
 ### Dataset de features em memória
 
-**Decisão**
+**Motivo:**  
+O serviço precisa consultar rapidamente as features associadas ao 
+usuário e aos produtos candidatos durante a inferência.
 
-Manter o dataset processado em memória nesta implementação.
+**Benefício:**  
+O acesso em memória reduz o custo de leitura durante a requisição 
+e simplifica o fluxo de serving.
 
-**Motivação**
+**Evolução:**  
+O dataset pode ser substituído por uma camada de armazenamento de 
+features, como um feature store ou outro mecanismo de armazenamento 
+distribuído, sem alterar o contrato da API.
 
-Permite acesso rápido às features e mantém a execução do serviço
-simples.
+---
 
-**Trade-off**
+### Modelo carregado no startup
 
-Em um ambiente com múltiplas réplicas, o dataset seria replicado na
-memória de cada instância.
+**Motivo:**  
+O artefato do modelo e seus componentes de pré-processamento são os
+mesmos para as requisições atendidas pela instância.
 
-**Melhoria**
+**Benefício:**  
+O modelo permanece carregado em memória e não é necessário realizar
+`pickle.load()` durante cada requisição, reduzindo o trabalho 
+no caminho crítico.
 
-A camada de serving pode utilizar armazenamento compartilhado ou
-distribuído, permitindo a API consultar apenas os dados
-necessários para a requisição.
+**Evolução:**  
+O carregamento pode evoluir para um mecanismo de gerenciamento e 
+versionamento de modelos, permitindo atualizações controladas, 
+validação de compatibilidade e rollback.
 
-------------------------------------------------------------------------
+---
 
 ### Inferência online
 
-**Decisão**
+**Motivo:**  
+O score precisa ser calculado para os produtos candidatos do 
+usuário no momento da requisição.
 
-Calcular o score durante a requisição.
+**Benefício:**  
+A API consegue produzir recomendações utilizando o modelo atual sem 
+precisar armazenar previamente todas as recomendações finais dos usuários.
 
-**Motivação**
+**Evolução:**  
+O fluxo pode ser dividido em duas etapas: geração de candidatos e 
+ranking. Dessa forma, o modelo de ranking trabalha somente sobre 
+um conjunto reduzido de produtos candidatos.
 
-O modelo já está carregado e o custo da inferência pode ser mantido
-dentro do caminho de serving.
+---
 
-**Benefício**
+### Cold start por popularidade
 
-Não é necessário manter um segundo artefato contendo recomendações
-finais para todos os usuários.
+**Motivo:**  
+Usuários sem histórico não possuem informações comportamentais suficientes
+ para gerar uma recomendação personalizada.
 
-**Trade-off**
+**Benefício:**  
+O fallback garante uma resposta válida para qualquer `user_id`, utilizando
+uma informação disponível independentemente do histórico individual.
 
-O custo computacional do modelo passa a fazer parte da latência da API.
-
-**Melhoria**
-
-O fluxo permite introduzir cache ou pré-cálculo seletivo quando
-necessário, sem alterar o contrato da API.
-
-------------------------------------------------------------------------
-
-### Fallback por popularidade
-
-**Decisão**
-
-Utilizar `popularity_score` para usuários sem histórico.
-
-**Motivação**
-
-É uma estratégia simples, rápida e disponível para qualquer usuário.
-
-**Benefício**
-
-Garante uma resposta válida mesmo sem dados comportamentais.
-
-**Trade-off**
-
-O resultado não é personalizado.
-
-**Melhoria**
-
-O fallback pode incorporar sinais contextuais e segmentação conforme
-novos dados estejam disponíveis.
+**Evolução:**  
+O fallback pode incorporar outras estratégias, como recomendações por 
+categoria, contexto da requisição, tendências recentes ou modelos 
+específicos para usuários novos.
 
 ------------------------------------------------------------------------
 
-## 11. Arquitetura de Produção
+## 12. O que eu faria diferente com mais tempo
 
-A arquitetura separa o pipeline de dados da camada de serving.
+### Dados
 
-``` text
-                 PIPELINE OFFLINE
-                        │
-        ┌───────────────┴───────────────┐
-        │                               │
-  Eventos históricos             Catálogo de produtos
-        │                               │
-        └───────────────┬───────────────┘
-                        ↓
-                Feature Processing
-                        ↓
-              Feature Storage/Serving
-                        │
-                        │
-                 ───────┴───────
-                        │
-                   ONLINE API
-                        │
-                     user_id
-                        ↓
-                Buscar features
-                        ↓
-              Candidate Generation
-                        ↓
-                    Ranking
-                        ↓
-                    Top 10
-```
-
-### Pipeline offline
-
-Responsável por:
-
--   ingestão dos eventos;
--   agregações;
--   cálculo das features;
--   atualização das features;
--   versionamento dos artefatos.
-
-### Feature serving
-
-Responsável por disponibilizar rapidamente as features necessárias para
-uma requisição.
-
-A API não precisa conhecer a origem dos dados. Ela recebe os dados
-necessários para executar a recomendação.
-
-### Recommendation API
-
-Responsável por:
-
--   receber a requisição;
--   obter as features necessárias;
--   gerar ou receber os candidatos;
--   executar o ranking;
--   aplicar o fallback;
--   retornar a resposta.
-
-Essa separação permite que o pipeline de dados e a API sejam escalados e
-atualizados de forma independente.
-
-------------------------------------------------------------------------
-
-## 12. Escalabilidade do Ranking
-
-A implementação trabalha com as combinações usuário-produto disponíveis
-no dataset.
-
-Para controlar o custo do ranking conforme o catálogo cresce, o fluxo é
-dividido em duas etapas:
-
-``` text
-Candidate Generation
-        ↓
-conjunto reduzido de candidatos
-        ↓
-Ranking Model
-        ↓
-Top K
-```
-
-O candidate generation pode utilizar diferentes estratégias, como:
-
--   popularidade;
--   histórico do usuário;
--   similaridade;
--   modelos de retrieval;
--   regras de negócio.
-
-O modelo de ranking avalia somente um conjunto reduzido de candidatos.
-
-Essa separação evita avaliar todos os produtos disponíveis para cada
-usuário e permite escalar o sistema de recomendação de forma
-independente do tamanho total do catálogo.
-
-------------------------------------------------------------------------
-
-## 13. Evoluções
-
-### Dados e features
-
--   pipeline offline agendado;
--   feature serving;
--   versionamento de features;
--   atualização incremental;
--   tratamento de dados atrasados;
--   validação de qualidade dos dados.
+-   Separar a atualização das features do ciclo de vida da API;
+-   validação automática da qualidade dos dados;
 
 ### Modelo
 
--   versionamento explícito;
--   validação de compatibilidade entre modelo e runtime;
--   monitoramento de drift;
--   avaliação offline;
--   estratégia de rollback;
--   atualização sem downtime.
+-   versionamento dos artefatos;
+-   validação mais completa do `model_card.json`;
+-   controle de compatibilidade entre versão do modelo e dependências;
 
 ### Serving
 
 -   candidate generation;
--   cache quando fizer sentido;
--   múltiplas réplicas;
--   autoscaling;
--   atualização sem downtime.
+-   cache de resultados quando apropriado;
 
 ### Observabilidade
 
--   métricas Prometheus;
+-   p50/p95/p99;
+-   tracing distribuído;
 -   dashboards;
--   p95/p99;
--   tracing;
 -   alertas;
--   correlação entre request, modelo e versão das features.
-
-### Qualidade da recomendação
-
-Além de latência e disponibilidade, podem ser monitoradas métricas como:
-
--   CTR;
--   conversion rate;
--   coverage;
--   diversity;
--   novelty;
--   NDCG;
--   MAP;
--   Recall@K.
-
-As métricas exatas dependem do objetivo do produto e do comportamento
-esperado do sistema.
+-   logs detalhados a partir do usuário requisitado.
 
 ------------------------------------------------------------------------
 
-## 14. Limitações Conhecidas
+## 13. Limitações conhecidas
 
-A implementação possui algumas simplificações decorrentes do formato dos
-dados fornecidos pelo exercício:
+As principais limitações da implementação atual são:
 
-1.  A fonte de dados utilizada é composta por arquivos CSV.
-2.  As features processadas são mantidas em memória.
+1.  Os dados de entrada são fornecidos em CSV.
+2.  O dataset de features é mantido em memória.
 3.  As métricas são mantidas em memória.
-4.  O fallback é baseado em popularidade.
-5.  O ranking considera as combinações disponíveis no dataset.
-6.  A coleta de métricas ainda não é compartilhada entre réplicas.
-7.  A atualização das features e do modelo não faz parte do ciclo de
-    execução da API.
+4.  O fallback utiliza somente popularidade.
+5.  O ranking considera o conjunto de produtos gerado pelo feature
+    processing.
+6.  A atualização de dados e do modelo ocorre por ciclo de inicialização
+    da aplicação.
 
-Esses pontos são tratados como componentes desacoplados da lógica de
-recomendação. A evolução natural é substituir as implementações locais
-por serviços distribuídos de dados, métricas e atualização de modelos,
-preservando o contrato da API.
+Essas decisões mantêm o serviço simples e coerente com o escopo do case,
+enquanto deixam pontos claros de evolução.
 
 ------------------------------------------------------------------------
 
-## 15. Como Executar
+## 14. Como executar
 
 ### Ambiente local
 
-Instalar dependências:
-
 ``` bash
 pip install -r requirements.txt
-```
-
-Executar os testes:
-
-``` bash
 python -m pytest -v
-```
-
-Iniciar a API:
-
-``` bash
 uvicorn app.main:app --reload
 ```
 
@@ -769,56 +604,57 @@ Acessar:
 http://localhost:8000/docs
 http://localhost:8000/health
 http://localhost:8000/metrics
-```
-
-Recomendações:
-
-``` text
 http://localhost:8000/recommendations/{user_id}
 ```
 
 ### Docker
 
-Build:
-
 ``` bash
 docker build -t personalization-api .
-```
-
-Run:
-
-``` bash
 docker run --rm -p 8000:8000 personalization-api
 ```
 
 ------------------------------------------------------------------------
 
-## 16. Resumo
+## 15. Resumo
 
-A solução separa preparação de dados e inferência online.
+A solução mantém o processamento de dados separado da inferência e
+carrega o modelo uma única vez no ciclo de vida da aplicação.
 
 ``` text
-dados
-  ↓
+events + products
+       ↓
 feature processing
-  ↓
+       ↓
 feature dataset
-  ↓
-API
-  ↓
-scaler
-  ↓
-modelo
-  ↓
+       ↓
+FastAPI
+       ↓
+user_id
+       ↓
+features
+       ↓
+scaler + model
+       ↓
+score
+       ↓
 ranking
-  ↓
+       ↓
 Top 10
 ```
 
-A arquitetura de serving mantém o caminho da requisição pequeno e
-previsível, enquanto o processamento de dados, o armazenamento das
-features, a geração de candidatos e o ranking possuem responsabilidades
-independentes.
+Para usuários sem histórico:
 
-Essa separação permite evoluir cada componente de acordo com seu volume,
-SLA e frequência de atualização sem alterar o contrato externo da API.
+``` text
+user_id
+   ↓
+sem histórico
+   ↓
+popularity_score
+   ↓
+Top 10
+```
+
+A arquitetura prioriza baixa latência no caminho da requisição,
+separação de responsabilidades, tratamento explícito de cold start,
+observabilidade e testes do fluxo completo.
