@@ -42,6 +42,5 @@ def build_feature_dataset(
     ).astype(int)
 
     feature_df = feature_df.drop(columns=['user_affinity_category'])
-    feature_df.to_csv("data/feature_dataset.csv", index=False)
 
     return feature_df
