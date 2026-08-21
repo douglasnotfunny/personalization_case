@@ -17,24 +17,6 @@ configure_logging()
 
 logger = logging.getLogger("personalization")
 
-app = FastAPI(
-    title="Personalization API"
-)
-
-@app.exception_handler(Exception)
-async def exception_handler(request: Request, exc: Exception):
-    record_error()
-
-    logger.exception(
-        "application_error path=%s",
-        request.url.path,
-    )
-
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error"},
-    )
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -79,12 +61,27 @@ async def lifespan(app: FastAPI):
 
     yield
 
+
 app = FastAPI(
     title="Personalization API",
     description="Recommendation service",
     version="0.1.0",
     lifespan=lifespan,
 )
+
+@app.exception_handler(Exception)
+async def exception_handler(request: Request, exc: Exception):
+    record_error()
+
+    logger.exception(
+        "application_error path=%s",
+        request.url.path,
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
 
 
 @app.get("/")
