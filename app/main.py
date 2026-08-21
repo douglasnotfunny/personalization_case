@@ -84,11 +84,6 @@ async def exception_handler(request: Request, exc: Exception):
     )
 
 
-@app.get("/")
-def root():
-    return {"message": "Hello World"}
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
