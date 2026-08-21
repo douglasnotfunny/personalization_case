@@ -256,7 +256,7 @@ A resposta indica explicitamente o uso do fallback:
 
 ``` json
 {
-  "user_id": "cold_start_user",
+  "user_id": "u_99999",
   "recommendations": [
     {
       "product_id": "p_030",
@@ -321,8 +321,8 @@ Exemplo:
 
 ## 8. Observabilidade
 
-A aplicação registra logs estruturados em formato legível por sistemas
-de agregação.
+A aplicação registra logs estruturados no formato key=value, facilitando 
+a busca, filtragem e agregação dos eventos.
 
 Para cada requisição de recomendação são registrados:
 
